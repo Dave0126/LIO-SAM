@@ -15,7 +15,8 @@
 #include <visualization_msgs/Marker.h>
 #include <visualization_msgs/MarkerArray.h>
 
-#include <opencv/cv.h>
+// #include <opencv/cv.h>   // To fix "fatal error: opencv/cv.h: 没有那个文件或目录" in opencv4(Ubuntu 20.04)
+#include <opencv2/imgproc.hpp>
 
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
@@ -249,22 +250,43 @@ public:
         usleep(100);
     }
 
+/*
+将原始IMU数据：三轴加速度、三轴角速度、三轴角度，与雷达坐标系进行旋转对齐
++ 对齐之后输出的加速度、角速度、角度的x，y，z就变成雷达坐标系的x，y，z
++ 这里的特殊之处在于允许IMU的加速度、角速度与角度的输出是两个不同的坐标系。但在算法中，角度的输出除了用来做第一帧的初始化和加权融合，似乎没有其他作用
++ 这里是将IMU的三个轴与雷达的三个轴在旋转上做对齐，不能加上平移
++ 对向量做坐标系变换，对多个变换的复合应该是右乘
+*/
     sensor_msgs::Imu imuConverter(const sensor_msgs::Imu& imu_in)
     {
         sensor_msgs::Imu imu_out = imu_in;
-        // rotate acceleration
+        /**
+         * 对加速度向量做坐标系变换，注意这里要理解成坐标系变换，也就是同一个加速度在IMU坐标系和Lidar坐标系的不同表达。不能想象成对加速度做旋转
+        */
         Eigen::Vector3d acc(imu_in.linear_acceleration.x, imu_in.linear_acceleration.y, imu_in.linear_acceleration.z);
         acc = extRot * acc;
         imu_out.linear_acceleration.x = acc.x();
         imu_out.linear_acceleration.y = acc.y();
         imu_out.linear_acceleration.z = acc.z();
-        // rotate gyroscope
+        /**
+         * rotate gyroscope
+         * 对角速度做坐标系变换。将IMU坐标系下的向量变换到雷达坐标系。
+        */
         Eigen::Vector3d gyr(imu_in.angular_velocity.x, imu_in.angular_velocity.y, imu_in.angular_velocity.z);
         gyr = extRot * gyr;
         imu_out.angular_velocity.x = gyr.x();
         imu_out.angular_velocity.y = gyr.y();
         imu_out.angular_velocity.z = gyr.z();
-        // rotate roll pitch yaw
+        /**
+         * rotate roll pitch yaw
+         * 对角度做坐标系变换。
+         * + q_from是IMU在全局坐标系下的位姿，q_from: transformation_from_map_to_imu
+         * + extQRPY如果与extRot对应的话应该是lidar到imu的变换：transformation_from_lidar_to_imu
+         * + q_final是将雷达点云从雷达坐标系转换到map坐标系的变换，也是：transformation_from_map_to_lidar -> pcd_in_map = q_final * pcd_in_lidar
+         * + 这里原代码是q_final = q_from * extQRPY；似乎有点问题，还是按照我的推导修改成q_final = q_from * extQRPT.inverse()；由于这里的extQRPY是
+         * + 直接从配置文件里面读取的，所以这里加不加逆只需要在配置文件里改就行。认为这里有问题的假设是认为extQRPY和extRot的坐标系关系的定义是一致的，也就是
+         * + 将imu坐标系下的向量转换到雷达坐标系下。如果作者对这两者的定义刚好是相反的，那这里就没有问题。
+        */
         Eigen::Quaterniond q_from(imu_in.orientation.w, imu_in.orientation.x, imu_in.orientation.y, imu_in.orientation.z);
         Eigen::Quaterniond q_final = q_from * extQRPY;
         imu_out.orientation.x = q_final.x();

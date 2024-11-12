@@ -177,6 +177,27 @@ public:
         odomQueue.push_back(*odometryMsg);
     }
 
+/** 原始雷达点云话题的回调函数，实际上真正做点云处理的函数
+    * 实际处理流程是单线程流水线式处理，这个函数后面的所有函数都是为这个函数服务，因此需要了解
+    * 点云去畸变的流程。
+    * 订阅原始lidar数据
+    * 1、转换点云为统一格式，提取点云信息
+    *   1）添加一帧激光点云到队列，取出最早一帧作为当前帧
+    *   2) 计算起止时间戳，检查数据有效性
+    * 2、从IMU数据和IMU里程计数据中提取去畸变信息
+    *   imu数据：
+    *   1) 遍历当前激光帧起止时刻之间的imu数据，初始时刻对应imu的姿态角RPY设为当前帧的初始姿态角
+    *   2) 用角速度、时间积分，计算每一时刻相对于初始时刻的旋转量，初始时刻旋转设为0
+    *   imu里程计数据：
+    *   1) 遍历当前激光帧起止时刻之间的imu里程计数据，初始时刻对应imu里程计设为当前帧的初始位姿
+    *   2) 用起始、终止时刻对应imu里程计，计算相对位姿变换，保存平移增量
+    * 3、当前帧激光点云运动畸变校正
+    *   1) 检查激光点距离、扫描线是否合规
+    *   2) 激光运动畸变校正，保存激光点
+    * 4、提取有效激光点，集合信息到准备发布的cloud_info数据包
+    * 5、发布当前帧校正后点云，有效点和其他信息
+    * 6、重置参数，接收每帧lidar数据都要重置这些参数
+**/
     void cloudHandler(const sensor_msgs::PointCloud2ConstPtr& laserCloudMsg)
     {
         if (!cachePointCloud(laserCloudMsg))
@@ -345,6 +366,9 @@ public:
             imuAngular2rosAngular(&thisImuMsg, &angular_x, &angular_y, &angular_z);
 
             // integrate rotation
+            // 对角度做积分
+            // 再次强调，对角速度的积分不是简单的角速度乘以间隔时间
+            // 关于角速度的积分公式可以查阅：https://zhuanlan.zhihu.com/p/591613108
             double timeDiff = currentImuTime - imuTime[imuPointerCur-1];
             imuRotX[imuPointerCur] = imuRotX[imuPointerCur-1] + angular_x * timeDiff;
             imuRotY[imuPointerCur] = imuRotY[imuPointerCur-1] + angular_y * timeDiff;
@@ -522,28 +546,35 @@ public:
     {
         int cloudSize = laserCloudIn->points.size();
         // range image projection
+        // 遍历当前帧的点云
         for (int i = 0; i < cloudSize; ++i)
         {
+            // 提取点云的 x, y, z, intensity, time, ring 字段信息
             PointType thisPoint;
             thisPoint.x = laserCloudIn->points[i].x;
             thisPoint.y = laserCloudIn->points[i].y;
             thisPoint.z = laserCloudIn->points[i].z;
             thisPoint.intensity = laserCloudIn->points[i].intensity;
 
+            // 计算点云到雷达中心的距离range, 没有使用原本的range信息
             float range = pointDistance(thisPoint);
+            // 去除range不符合上下限的点
             if (range < lidarMinRange || range > lidarMaxRange)
                 continue;
 
             int rowIdn = laserCloudIn->points[i].ring;
+            // 去除ring不符合设置线束的点
             if (rowIdn < 0 || rowIdn >= N_SCAN)
                 continue;
 
+            // 进行下采样: 对下采样率取余。例如下采样率为2, 说明隔行保留采样点
             if (rowIdn % downsampleRate != 0)
                 continue;
 
             int columnIdn = -1;
             if (sensor == SensorType::VELODYNE || sensor == SensorType::OUSTER)
             {
+                // 对于旋转类型的雷达，根据 arctan(x,y) 计算该点的列索引
                 float horizonAngle = atan2(thisPoint.x, thisPoint.y) * 180 / M_PI;
                 static float ang_res_x = 360.0/float(Horizon_SCAN);
                 columnIdn = -round((horizonAngle-90.0)/ang_res_x) + Horizon_SCAN/2;
@@ -562,10 +593,15 @@ public:
             if (rangeMat.at<float>(rowIdn, columnIdn) != FLT_MAX)
                 continue;
 
+            // 根据该点的时间戳, 找到去畸变信息中的旋转和平移，变换该点到当前点云帧起始位置的坐标系
             thisPoint = deskewPoint(&thisPoint, laserCloudIn->points[i].time);
 
+            // 将该点及其对应的range信息记录到去畸变点云变量和rangeMat变量
+            // 图像像素保存每个点距离原点的距离，称做RangeMat
+            // RangeMat是规则的，每一行代表一条激光线束扫射360度所产生的点，因此后面用这个RangeMat做特征提取更快速更简单
             rangeMat.at<float>(rowIdn, columnIdn) = range;
 
+            // 更新索引
             int index = columnIdn + rowIdn * Horizon_SCAN;
             fullCloud->points[index] = thisPoint;
         }
