@@ -1,0 +1,10 @@
+<launch>
+    <arg name="project" default="lio_sam"/>
+
+    <!-- <param name="/lio_sam/save_path/file_path" type="string" value="/home/mnf/Workspace/test_catkin_ws/src/LIO-SAM/data/liosam_path_stevens_dataset_VL16.txt"/> -->
+    <!-- <param name="/lio_sam/save_path/file_path" type="string" value="/home/mnf/Workspace/test_catkin_ws/src/LIO-SAM/data/liosam_path_campus_small_dataset.txt"/> -->
+    <!-- <param name="/lio_sam/save_path/topic_name" type="string" value="/lio_sam/mapping/odometry"/> -->
+    
+    <node pkg="$(arg project)" type="$(arg project)_savePath" name="$(arg project)_savePath" output="screen"/>
+    
+</launch>
